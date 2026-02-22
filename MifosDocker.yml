@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  # [Refined] Database: Hardened MariaDB with Enterprise Best Practices
+  db:
+    image: mariadb:11.4
+    container_name: fineract-mariadb
+    restart: always # Guaranteed uptime from MySQL 8 patterns
+    extends:
+      file: ./config/docker/compose/mariadb.yml
+      service: mariadb
+    command: [
+      '--character-set-server=utf8mb4',
+      '--collation-server=utf8mb4_unicode_ci',
+      '--explicit_defaults_for_timestamp=1',
+      '--lower_case_table_names=1'
+    ]
+    env_file:
+      - ./config/docker/env/fineract-mariadb.env
+    volumes:
+      # Hardening: Read-Only mounts to prevent accidental configuration drift
+      - ./config/mariadb/init:/docker-entrypoint-initdb.d:ro
+      - ./config/mariadb/conf.d:/etc/mysql/conf.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pmysql"]
+      interval: 10s
+      timeout: 10s # Increased timeout for heavy migrations
+      retries: 10
+
+  activemq:
+    image: apache/activemq-classic:latest
+    container_name: fineract-activemq
+    restart: always
+    ports:
+      - "61616:61616"
+      - "8161:8161"
+    env_file:
+      - ./config/docker/env/activemq.env
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "61616"]
+
+  fineract: # Manager Node (Central Logic & Write Operations)
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fineract-app
+    user: "nobody:nogroup"
+    env_file:
+      - ./config/docker/env/fineract-common.env
+      - ./config/docker/env/fineract.env
+      - ./config/docker/env/aws.env
+      - ./config/docker/env/activemq.env
+    depends_on:
+      db:
+        condition: service_healthy
+      activemq:
+        condition: service_healthy
+    ports:
+      - "8443:8443"
+      - "8080:8080"
+      - "5000:5000"
+    environment:
+      - JAVA_OPTS=-Xms4G -Xmx8G -Duser.timezone=UTC -Duser.home=/tmp -Dfile.encoding=UTF-8 -Djava.security.egd=file:/dev/./urandom -Dspring.output.ansi.enabled=ALWAYS -Dcheckstyle.skip=true -Dspring.main.lazy-initialization=false -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5000
+      
+      - FINERACT_REMOTE_JOB_MESSAGE_HANDLER_SPRING_EVENTS_ENABLED=true
+      - FINERACT_REMOTE_JOB_MESSAGE_HANDLER_KAFKA_ENABLED=false
+      - FINERACT_MESSAGING_ACTIVEMQ_BROKER_URL=tcp://activemq:61616
+      
+      - FINERACT_MODE=WRITE
+      - FINERACT_CONTENT_REPOSITORY_TYPE=S3 
+      - SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=25
+      - FINERACT_HIKARI_JDBC_URL=jdbc:mariadb://db:3306/fineract_default?serverTimezone=UTC&useLegacyDatetimeCode=false
+      - FINERACT_DB_MIGRATION_ENABLED=true
+      - FINERACT_REPORT_ENGINE_BIRT_ENABLED=true
+      - FINERACT_SQL_VALIDATION_ENABLED=true
+      - SERVER_SSL_KEY_STORE_PASSWORD=xyz123
+    volumes:
+      - ./my-birt-plugin:/app/custom/birt/service 
+      - ./my-reports:/app/reports
+      - ./fineract-logs:/tmp/fineract-logs
+      - ./keystore.jks:/opt/bitnami/tomcat/tomcat.keystore
+      - fineract-data:/tmp/.fineract
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+
+  fineract-worker: # Replicated Worker (Reporting & Read Tasks)
+    extends:
+      service: fineract
+    container_name: fineract-worker
+    ports:
+      - "8444:8443"
+    environment:
+      - FINERACT_MODE=READ
+    deploy:
+      mode: replicated
+      replicas: 2
+
+  # [The Modern UI] New Angular-based Web App (Folder 11)
+  mifos-web-app:
+    image: openmf/web-app:master
+    container_name: mifos-web-app
+    ports:
+      - "4200:80"
+    depends_on:
+      - fineract
+
+  # [The Legacy UI] Keeping for compatibility
+  community-app:
+    image: openmf/community-app:latest
+    container_name: mifos-ui
+    ports:
+      - "9090:80"
+    depends_on:
+      - fineract
+
+  # Observability Stack
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fineract-grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - fineract
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fineract-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+volumes:
+  fineract-data:
