@@ -1,0 +1,33 @@
+name: Check Fineract Docker Build
+
+on:
+  push:
+    branches: [ main ] 
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Start Fineract with Docker Compose
+        run: |
+          docker-compose up -d  
+          sleep 60             
+          docker-compose ps     
+
+      - name: Check Status
+        run: |
+          if [ $(docker ps -q | wc -l) -gt 0 ]; then
+            echo "Success! Docker containers are running."
+          else
+            echo "Failed! No containers are running."
+            exit 1
+          fi
