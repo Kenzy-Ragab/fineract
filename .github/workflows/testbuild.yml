@@ -19,9 +19,9 @@ jobs:
 
       - name: Start Fineract with Docker Compose
         run: |
-          docker-compose up -d  
+          docker compose up -d  
           sleep 60             
-          docker-compose ps     
+          docker compose ps     
 
       - name: Check Status
         run: |
